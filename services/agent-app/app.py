@@ -16,11 +16,8 @@ AGENT_SERVICE_URL = os.environ["AGENT_SERVICE_URL"]
 
 @st.cache_resource(show_spinner=False)
 def _get_http_client() -> httpx.Client:
-    # Must exceed the backend's AGENT_QUERY_TIMEOUT_SECONDS (180s) --
-    # otherwise the frontend gives up and shows a false "backend timed
-    # out" error while the backend is still legitimately retrying a
-    # TPM-limited Groq call in the background.
-    return httpx.Client(base_url=AGENT_SERVICE_URL, timeout=200.0)
+    return httpx.Client(base_url=AGENT_SERVICE_URL, timeout=200.0,
+                         headers={"x-app-secret": os.environ["APP_SHARED_SECRET"]})
 
 
 @st.cache_resource(show_spinner=False)
@@ -93,7 +90,25 @@ def build_party_chart(chart_data):
     return chart_fn(df, **kwargs)
 
 
+
+def _check_password() -> bool:
+    if st.session_state.get("authenticated"):
+        return True
+    st.title("DIP Parliamentary Agent")
+    pwd = st.text_input("Password", type="password")
+    if st.button("Enter"):
+        if pwd == os.environ["APP_PASSWORD"]:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
+
 def main():
+    if not _check_password():
+        return
     st.set_page_config(page_title="DIP Parliamentary Agent")
     _ensure_db_initialized()
 
@@ -205,6 +220,8 @@ def main():
 
             st.session_state.chat_messages.append(msg)
             db_utils.touch_thread(st.session_state.thread_id)
+
+
 
 
 if __name__ == "__main__":

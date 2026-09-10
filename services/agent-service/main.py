@@ -14,7 +14,7 @@ from agent_graph import (
     run_agent_query,
 )
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_openai import ChatOpenAI
 from mcp_client import start_mcp_session, stop_mcp_session
@@ -37,10 +37,6 @@ except Exception:  # noqa: S110 -- optional at startup; _maybe_reload_env()
     # means the first reload check runs once with mtime=0. Can't log
     # here: `logger` isn't configured yet at this point in the module.
     pass
-
-
-
-
 
 
 
@@ -91,6 +87,17 @@ def _get_required_env(name: str) -> str:
     if not value:
         raise ValueError(f"required environment variable {name} is not set")
     return value
+
+
+
+APP_SHARED_SECRET = _get_required_env("APP_SHARED_SECRET")
+
+def _verify_secret(x_app_secret: str = Header(...)):
+    if x_app_secret != APP_SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+
 
 
 LLM_API_KEY = _get_required_env("LLM_API_KEY")
@@ -214,7 +221,7 @@ def _build_chart_data(scoped_results: list[dict], chart_type: str) -> dict | Non
 
 
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query", response_model=QueryResponse, dependencies=[Depends(_verify_secret)])
 async def query(req: QueryRequest) -> QueryResponse:
     if state["graph"] is None:
         raise HTTPException(status_code=503, detail="agent not ready")
@@ -318,7 +325,7 @@ async def query(req: QueryRequest) -> QueryResponse:
     )
 
 
-@app.get("/threads/{thread_id}/messages")
+@app.get("/threads/{thread_id}/messages", dependencies=[Depends(_verify_secret)])
 async def get_thread_messages(thread_id: str) -> list[dict]:
     if state["pool"] is None:
         raise HTTPException(status_code=503, detail="agent not ready")

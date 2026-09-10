@@ -396,11 +396,11 @@ def deterministic_fallback_answer(tool_results: list[dict]) -> str:
 
 def load_agent_config(overrides: dict | None = None) -> dict:
     cfg = {
-        "enable_reflection": os.getenv("ENABLE_REFLECTION", "true").lower() == "true",
-        "enable_hallucination_guard": os.getenv("ENABLE_HALLUCINATION_GUARD", "true").lower() == "true",
-        "max_reflection_iterations": int(os.getenv("MAX_REFLECTION_ITERATIONS", "3")),
-        "faithfulness_threshold": float(os.getenv("FAITHFULNESS_THRESHOLD", "0.8")),
-        "completeness_threshold": float(os.getenv("COMPLETENESS_THRESHOLD", "0.7")),
+        "enable_reflection": os.getenv("ENABLE_REFLECTION").lower() == "true",
+        "enable_hallucination_guard": os.getenv("ENABLE_HALLUCINATION_GUARD").lower() == "true",
+        "max_reflection_iterations": int(os.getenv("MAX_REFLECTION_ITERATIONS")),
+        "faithfulness_threshold": float(os.getenv("FAITHFULNESS_THRESHOLD")),
+        "completeness_threshold": float(os.getenv("COMPLETENESS_THRESHOLD")),
     }
     if overrides:
         cfg.update(overrides)
