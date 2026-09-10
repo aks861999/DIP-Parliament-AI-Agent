@@ -1,0 +1,184 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install ruff
+      - run: ruff check services
+
+  unit-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dip_agent
+          POSTGRES_PASSWORD: dip_agent_ci_password
+          POSTGRES_DB: dip_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 5
+    env:
+      POSTGRES_USER: dip_agent
+      POSTGRES_PASSWORD: dip_agent_ci_password
+      POSTGRES_DB: dip_agent
+      DATABASE_URL: postgresql://dip_agent:dip_agent_ci_password@localhost:5432/dip_agent
+      REDIS_URL: redis://localhost:6379/1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: pip install -r services/mcp-server/requirements.txt
+      - run: pip install -r services/agent-service/requirements.txt
+      - name: Run unit tests
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/services/mcp-server:$GITHUB_WORKSPACE/services/agent-app"
+          pytest tests -v --junitxml=unit-test-report.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-report
+          path: unit-test-report.xml
+
+  # BLOCKING. Grades behavior (tool selection + deterministic grounding
+  # against the tool's own JSON), never real-world factual correctness.
+  # Runs against the fixture stub (services/evaluation/stub_mcp_server.py)
+  # -- no DIP_API_KEY needed here. Mirrors gitlab-ci.yml's agent-eval-gate.
+  agent-eval-gate:
+    needs: unit-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dip_agent
+          POSTGRES_PASSWORD: dip_agent_ci_password
+          POSTGRES_DB: dip_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-retries 5
+    env:
+      POSTGRES_USER: dip_agent
+      POSTGRES_PASSWORD: dip_agent_ci_password
+      POSTGRES_DB: dip_agent
+      DATABASE_URL: postgresql://dip_agent:dip_agent_ci_password@localhost:5432/dip_agent
+      LLM_MODEL: MiniMaxAI/MiniMax-M2.5
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r services/evaluation/requirements.txt
+      - run: pip install -r services/agent-app/requirements.txt
+      - run: pip install -r services/agent-service/requirements.txt
+      - name: Run mocked end-to-end evaluation
+        run: |
+          cd services/evaluation
+          python evaluate_end_to_end.py --testset scenarios_mocked.jsonl \
+            --tool-selection-threshold 0.9 --grounding-threshold 0.8
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-eval-results
+          path: services/evaluation/results
+
+  # NON-BLOCKING (continue-on-error). Hits the REAL DIP API via the real
+  # services/mcp-server/mcp_server.py. Needs DIP_API_KEY as a repo secret.
+  # Fails ONLY on a transport/HTTP-level error -- never on response content.
+  live-api-check:
+    needs: unit-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dip_agent
+          POSTGRES_PASSWORD: dip_agent_ci_password
+          POSTGRES_DB: dip_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 5
+    env:
+      POSTGRES_USER: dip_agent
+      POSTGRES_PASSWORD: dip_agent_ci_password
+      POSTGRES_DB: dip_agent
+      DATABASE_URL: postgresql://dip_agent:dip_agent_ci_password@localhost:5432/dip_agent
+      REDIS_URL: redis://localhost:6379/1
+      LLM_MODEL: MiniMaxAI/MiniMax-M2.5
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      MCP_TRANSPORT: stdio
+      DIP_API_KEY: ${{ secrets.DIP_API_KEY }}
+      DIP_API_BASE_URL: https://search.dip.bundestag.de/api/v1
+      LOG_LEVEL: INFO
+      MCP_CACHE_TTL_SECONDS: "1800"
+      PREWARM_ON_STARTUP: "false"
+      NAME_DIRECTORY_TTL_SECONDS: "86400"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r services/evaluation/requirements.txt
+      - run: pip install -r services/agent-app/requirements.txt
+      - run: pip install -r services/agent-service/requirements.txt
+      - run: pip install -r services/mcp-server/requirements.txt
+      - name: Run live-API evaluation
+        run: |
+          export MCP_SERVER_PYTHON="$(which python)"
+          export MCP_SERVER_SCRIPT="$GITHUB_WORKSPACE/services/mcp-server/mcp_server.py"
+          cd services/evaluation
+          python evaluate_live_api.py --testset scenarios_live.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-api-results
+          path: services/evaluation/results

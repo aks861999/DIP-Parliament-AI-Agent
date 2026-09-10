@@ -1,0 +1,6 @@
+# requirements.txt (repo root)
+# Thin — only what's needed to run tests/. tests/ additionally installs
+# services/mcp-server/requirements.txt and services/agent-app/requirements.txt
+# (see gitlab-ci.yml's unit-test stage and README.md's local test instructions).
+pytest==8.3.4
+pytest-asyncio==0.25.2

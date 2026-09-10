@@ -1,0 +1,16 @@
+# services/evaluation/requirements.txt
+# Superset of agent-app's deps since this script imports agent_graph.py
+# directly (sys.path.append, same pattern as tests/). The rest
+# (langgraph, langchain-core, mcp, langchain-mcp-adapters, dateparser,
+# langgraph-checkpoint-postgres, psycopg, langfuse) come from also
+# installing services/agent-app/requirements.txt, which
+# evaluation_setup_and_run.sh does in Step 2. No bcrypt /
+# sentence-transformers / torch: there is no auth and the old
+# nli_guard.py (HHEM) was removed in favor of grounding.py.
+#
+# This eval script does NOT require LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY
+# to be set, even though the langfuse package is installed — that
+# requirement is scoped to app.py only (tracing.py stays no-op-safe).
+langchain-openai
+pydantic==2.13.5
+python-dotenv==1.2.3

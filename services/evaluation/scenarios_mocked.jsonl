@@ -1,0 +1,30 @@
+{"question": "Who is Friedrich Merz?", "expected_tool": "get_person_info"}
+{"question": "Who is Olaf Scholz?", "expected_tool": "get_person_info"}
+{"question": "Tell me about Angela Merkel's parliamentary role history.", "expected_tool": "get_person_info"}
+{"question": "What is the party distribution in the 19th legislative session?", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 19}}
+{"question": "What is the party distribution in the 20th legislative session?", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 20}}
+{"question": "What is the party distribution in the 21st legislative session?", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 21}}
+{"question": "How many parties are represented in Wahlperiode 20?", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 20}}
+{"question": "What's the weather like in Berlin today?", "expected_tool": null}
+{"question": "Wer ist Olaf Scholz?", "expected_tool": "get_person_info"}
+{"question": "Can you tell me who Friedrich Merz is?", "expected_tool": "get_person_info"}
+{"question": "What's Angela Merkel's party affiliation?", "expected_tool": "get_person_info"}
+{"question": "Who is Frederich Mertz?", "expected_tool": "get_person_info"}
+{"question": "Give me a short bio of Olaf Scholz.", "expected_tool": "get_person_info"}
+{"question": "Who is Jean-Claude Juncker?", "expected_tool": "get_person_info"}
+{"question": "Wie ist die Sitzverteilung in der 20. Wahlperiode?", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 20}}
+{"question": "Show me the seat distribution for Wahlperiode 19.", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 19}}
+{"question": "What percentage of seats does the SPD hold in the 21st Bundestag?", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 21}}
+{"question": "Break down party representation for the current legislative period.", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 21}}
+{"question": "How many seats did the CDU/CSU win in Wahlperiode 20?", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 20}}
+{"question": "party composition wp 19", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 19}}
+{"question": "Who is the current Bundeskanzler?", "expected_tool": "get_persons_by_role", "expected_args_contains": {"wahlperiode": 21}}
+{"question": "Wer ist der aktuelle Bundeskanzler?", "expected_tool": "get_persons_by_role", "expected_args_contains": {"wahlperiode": 21}}
+{"question": "Who was the chancellor during Wahlperiode 20?", "expected_tool": "get_persons_by_role", "expected_args_contains": {"wahlperiode": 20}}
+{"question": "Who holds the office of Bundeskanzler right now?", "expected_tool": "get_persons_by_role", "expected_args_contains": {"wahlperiode": 21}}
+{"question": "Who is the Bundestag president?", "expected_tool": "get_persons_by_role"}
+{"question": "Compare the party distribution between Wahlperiode 20 and Wahlperiode 21.", "expected_tool": "get_party_distribution", "expected_args_contains": {"wahlperiode": 20}}
+{"question": "What's the best recipe for lasagna?", "expected_tool": null}
+{"question": "Who won the Champions League last year?", "expected_tool": null}
+{"question": "Can you write me a poem about spring?", "expected_tool": null}
+{"question": "What time zone is Berlin in?", "expected_tool": null}

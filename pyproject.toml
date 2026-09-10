@@ -1,0 +1,23 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Project-wide: BLE001 (blind except Exception) is intentionally used
+# throughout services/agent-service/tracing.py, cache.py, and main.py's
+# .env-reload watcher as documented fail-open guards -- a tracing SDK
+# hiccup, cache backend outage, or transient .env read failure must
+# degrade gracefully, never crash the request pipeline. Narrowing these
+# to specific exception types would require guessing every failure mode
+# of Redis/Langfuse/the filesystem, and missing one silently reintroduces
+# the exact crash these guards exist to prevent.
+ignore = ["BLE001"]
+
+[tool.ruff.lint.per-file-ignores]
+# ASYNC230: these are one-shot CLI scripts driven by a single top-level
+# asyncio.run() call, not a server handling concurrent requests -- there
+# is no event loop being starved by a blocking open() here, so wrapping
+# every file read in asyncio.to_thread() would add complexity to solve
+# a problem that cannot structurally occur in this execution model.
+"services/evaluation/evaluate_end_to_end.py" = ["ASYNC230"]
+"services/evaluation/evaluate_live_api.py" = ["ASYNC230"]
+"services/evaluation/generate_scenarios.py" = ["ASYNC230", "SIM115"]

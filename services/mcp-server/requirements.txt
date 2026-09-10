@@ -1,0 +1,8 @@
+# services/mcp-server/requirements.txt
+httpx==0.28.1
+python-dotenv==1.2.3
+mcp>=1.24.0,<2.0.0
+redis==8.1.0
+# Explicit, even though mcp pulls it in transitively — this project's
+# tool_contracts.py depends on it directly.
+pydantic>=2.0,<3.0

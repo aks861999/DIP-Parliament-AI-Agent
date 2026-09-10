@@ -1,0 +1,88 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local volumes
+volumes/postgres-data/
+volumes/redis-data/
+
+# Evaluation results
+services/evaluation/results/
+
+# Environment
+.env
+*.log
+
+# .gitignore
+.env
+venvs/
+volumes/
+services/evaluation/results/
+services/mcp-server/logs/
+services/agent-app/logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.DS_Store
+# Jupyter
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+
+
+openapi.yaml
+
+
+
+# --- Secrets: never commit real values ---
+.env
+.env.*
+!example.env
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# --- Virtual environments (native setup_and_run.sh scripts) ---
+venvs/
+.venv/
+
+# --- Runtime artifacts / logs ---
+*.log
+dip_agent.log
+services/mcp-server/logs/
+services/mcp-server/person_list_vs_id_report.json
+
+# --- Evaluation outputs ---
+services/evaluation/results/
+services/evaluation/scenarios_mocked_gen.jsonl
+
+# --- Docker volumes (Postgres/Redis data) ---
+volumes/
+
+# --- OS / editor cruft ---
+.DS_Store
+.vscode/
+.idea/
