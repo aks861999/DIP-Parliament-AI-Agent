@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 import redis.asyncio as redis
 from cache import Cache  # NEW
@@ -54,7 +55,17 @@ DIP_API_KEY = os.getenv("DIP_API_KEY") or None
 CACHE_TTL_SECONDS = int(_get_required_env("MCP_CACHE_TTL_SECONDS"))
 REDIS_URL = _get_required_env("REDIS_URL")
 
-mcp = FastMCP("dip-parliamentary-tools", host="0.0.0.0", port=8000)
+
+
+@asynccontextmanager
+async def app_lifespan(server: FastMCP):
+    if PREWARM_ON_STARTUP:
+        asyncio.create_task(_prewarm_name_directory())
+    yield
+
+
+
+mcp = FastMCP("dip-parliamentary-tools", host="0.0.0.0", port=8000, lifespan=app_lifespan)
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 dip_cache = Cache(redis_client, default_ttl_seconds=CACHE_TTL_SECONDS)  # NEW
 dip = DipClient(DIP_API_BASE_URL, DIP_API_KEY, cache=dip_cache)  # NEW: cache= added
@@ -367,9 +378,5 @@ async def health(_request):
 
 if __name__ == "__main__":
     transport = _get_required_env("MCP_TRANSPORT")
-    
-    if PREWARM_ON_STARTUP:
-        asyncio.get_event_loop().create_task(_prewarm_name_directory())
-
     logger.info("starting mcp-server (transport=%s, redis=%s)", transport, REDIS_URL)
     mcp.run(transport=transport)
