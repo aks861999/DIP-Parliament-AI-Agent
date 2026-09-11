@@ -3,8 +3,8 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import redis.asyncio as redis
 from cache import Cache  # NEW

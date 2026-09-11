@@ -45,6 +45,7 @@ _REQUIRED_ENV_DEFAULTS = {
     "PREWARM_ON_STARTUP": "false",
     "NAME_DIRECTORY_TTL_SECONDS": "86400",
     "MCP_TRANSPORT": "stdio",
+    "APP_SHARED_SECRET": "test-value"
 }
 
 
