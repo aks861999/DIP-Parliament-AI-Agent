@@ -2,6 +2,10 @@
 
 A conversational agent over the German Bundestag's DIP parliamentary data API. Users ask questions in natural language about politicians' biographical information, party affiliations, and legislative composition, and the agent retrieves structured data from DIP and generates natural-language answers.
 
+## LIVE at https://agent-app-mtkt.onrender.com/
+
+
+
 ## Architecture
 
 The system consists of three services communicating over well-defined boundaries:
@@ -57,7 +61,6 @@ This enables the same codebase to run natively via shell scripts or in container
 docker compose up --build
 ```
 
-Open http://localhost:8501.
 
 
 
