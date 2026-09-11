@@ -97,6 +97,11 @@ jobs:
       LLM_MODEL: MiniMaxAI/MiniMax-M2.5
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      ENABLE_REFLECTION: "true"
+      ENABLE_HALLUCINATION_GUARD: "true"
+      MAX_REFLECTION_ITERATIONS: "2"
+      FAITHFULNESS_THRESHOLD: "0.8"
+      COMPLETENESS_THRESHOLD: "0.7"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -162,6 +167,11 @@ jobs:
       MCP_CACHE_TTL_SECONDS: "1800"
       PREWARM_ON_STARTUP: "false"
       NAME_DIRECTORY_TTL_SECONDS: "86400"
+      ENABLE_REFLECTION: "true"
+      ENABLE_HALLUCINATION_GUARD: "true"
+      MAX_REFLECTION_ITERATIONS: "2"
+      FAITHFULNESS_THRESHOLD: "0.8"
+      COMPLETENESS_THRESHOLD: "0.7"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
