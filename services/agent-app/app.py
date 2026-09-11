@@ -186,12 +186,14 @@ def main():
             st.session_state.thread_persisted = True
 
         st.session_state.chat_messages.append({"role": "user", "content": query})
-        with st.chat_message("user"):
-            st.markdown(query)
+        st.session_state.pending_query = query
+        st.rerun()
 
+    if st.session_state.get("pending_query"):
+        pending = st.session_state.pending_query
         with st.chat_message("assistant"), st.spinner("Thinking..."):
             try:
-                result = run_query(query, st.session_state.thread_id)
+                result = run_query(pending, st.session_state.thread_id)
                 answer = result["answer"]
                 chart_data = result.get("party_distribution")
                 thinking_log = result.get("thinking_log") or []
@@ -208,10 +210,8 @@ def main():
 
             st.markdown(answer)
 
-            # chart_data may be a structured wrapper or a legacy dict.
-            # build_party_chart normalizes it and returns None if invalid.
             msg = {"role": "assistant", "content": answer, "chart_data": chart_data,
-                   "thinking_log": thinking_log}
+                "thinking_log": thinking_log}
 
             fig = build_party_chart(chart_data) if chart_data else None
             if fig is not None:
@@ -220,6 +220,7 @@ def main():
 
             st.session_state.chat_messages.append(msg)
             db_utils.touch_thread(st.session_state.thread_id)
+        st.session_state.pending_query = None
 
 
 
