@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import uuid
 
 import db_utils
@@ -26,15 +27,57 @@ def _ensure_db_initialized() -> bool:
     return True
 
 
+def _wake_agent_service(max_wait: float = 60.0, poll_interval: float = 3.0) -> bool:
+    """GET /health reliably wakes a sleeping Render free-tier instance;
+    POST requests do not (confirmed empirically: three consecutive
+    POST /query attempts got instant 502s with zero boot activity in
+    agent-service's logs, while a single GET /health triggered a full
+    boot sequence). Poll /health until it responds before retrying
+    the real request."""
+    client = _get_http_client()
+    elapsed = 0.0
+    while elapsed < max_wait:
+        try:
+            response = client.get("/health", timeout=10.0)
+            if response.status_code == 200:
+                return True
+        except httpx.TransportError:
+            pass
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    return False
+
+
+
+def _request_with_retry(method: str, url: str, retries: int = 3, **kwargs) -> httpx.Response:
+    client = _get_http_client()
+    for attempt in range(retries):
+        try:
+            response = client.request(method, url, **kwargs)
+            if response.status_code in (502, 503, 504):
+                logger.warning("agent-service returned %s (attempt %d/%d) — waking via GET /health...",
+                               response.status_code, attempt + 1, retries)
+                _wake_agent_service()
+                continue
+            response.raise_for_status()
+            return response
+        except httpx.TransportError:
+            logger.warning("agent-service unreachable (attempt %d/%d) — waking via GET /health...",
+                           attempt + 1, retries)
+            _wake_agent_service()
+            continue
+    raise RuntimeError("agent-service did not respond after wake attempts")
+
+
+
 def run_query(query: str, thread_id: str) -> dict:
-    response = _get_http_client().post("/query", json={"query": query, "thread_id": thread_id})
-    response.raise_for_status()
+    response = _request_with_retry("POST", "/query", json={"query": query, "thread_id": thread_id})
     return response.json()
 
 
+
 def get_thread_messages(thread_id: str) -> list[dict]:
-    response = _get_http_client().get(f"/threads/{thread_id}/messages")
-    response.raise_for_status()
+    response = _request_with_retry("GET", f"/threads/{thread_id}/messages")
     return response.json()
 
 
