@@ -28,6 +28,10 @@ class PartyDistribution(BaseModel):
     unclassified_count: int
     data_notes: str | None = None
 
+    
+class PartyDistributionHistory(BaseModel):
+    distributions: list[PartyDistribution]
+    data_notes: str | None = None
 
 class PersonInfoResult(BaseModel):
     person: dict | None = None

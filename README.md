@@ -6,6 +6,30 @@ A conversational agent over the German Bundestag's DIP parliamentary data API. U
 
 
 
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Setup](#setup)
+- [mcp-server, Design Decisions & Notes](#mcp-server-design-decisions--notes)
+  - [What this service is responsible for](#what-this-service-is-responsible-for)
+  - [Key components](#key-components)
+  - [Architecture at a Glance](#architecture-at-a-glance)
+  - [Design Decisions](#design-decisions)
+  - [Configuration Philosophy](#configuration-philosophy-options-are-fine-as-long-as-theyre-explained)
+  - [What I'd Do Differently](#what-id-do-differently)
+- [agent-service, Design Decisions & Notes](#agent-service-design-decisions--notes)
+  - [What this service is responsible for](#what-this-service-is-responsible-for-1)
+  - [Key components](#key-components-1)
+  - [Architecture at a Glance](#architecture-at-a-glance-1)
+  - [Design Decisions](#design-decisions-1)
+  - [Configuration Philosophy](#configuration-philosophy-options-are-fine-as-long-as-theyre-explained-1)
+  - [What I'd Do Differently](#what-id-do-differently-1)
+- [Testing](#testing)
+- [Environment Variables](#environment-variables)
+- [Progressive Improvements of the Codebase / Bug Fixes](#progressive-improvements-of-the-codebase--bug-fixes)
+
+
+
 ## Architecture
 
 The system consists of three services communicating over well-defined boundaries:
@@ -61,6 +85,8 @@ This enables the same codebase to run natively via shell scripts or in container
 docker compose up --build
 ```
 
+
+## 🔧 See also: **[Progressive Improvements of the Codebase / Bug Fixes](#progressive-improvements-of-the-codebase--bug-fixes)**
 
 
 
@@ -692,3 +718,29 @@ pytest tests -v -m integration
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `REDIS_URL` | Yes | Redis connection string |
 | `MCP_TRANSPORT` | No | `stdio` (default) or `sse` |
+
+---
+# Progressive Improvements of the Codebase / Bug Fixes
+
+
+# 2026-09-12 — MCP idle-connection failures fixed with auto-reconnect
+
+## Problem
+
+`agent-service` opens one permanent SSE connection to `mcp-server` at startup and never refreshes it. After sitting idle overnight (~10h, no traffic), the socket died silently. Nothing detected it until the next tool call:
+
+```
+ValueError: Error executing tool get_party_distribution: Error UNKNOWN while writing to socket. Connection lost.
+```
+
+Confirmed `mcp-server` itself never restarted (same PID, 10h uptime) — this was a stale client connection with no reconnect logic, so every call kept failing until `agent-service` was manually restarted.
+
+## Fix
+
+Added a `reconnect_mcp_session()` helper in `mcp_client.py` that tears down the dead session/transport/tool-cache and re-opens a fresh one.
+
+In `agent_graph.py`, wrapped both tool-call sites so that on a transport-level exception (`anyio`/`httpx` connection errors, or matching text like "connection lost"), the code reconnects and retries the call **once** before giving up. Non-transport errors (bad args, API 404s, parse failures) are left unretried and unmasked, since retrying those wouldn't fix anything.
+
+## Result
+
+- One bounded retry per failure, no infinite loop.

@@ -8,16 +8,12 @@ from pathlib import Path
 
 import redis.asyncio as redis
 from cache import Cache  # NEW
-from dip_client import (
-    DipClient,
-    aggregate_party_distribution,
-    resolve_current_person_fraktion,
-    suggest_person_names,
-)
+
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from tool_contracts import DateRange, PartyDistribution, PersonInfoResult
-from wahlperiode_utils import _wahlperiode_for_date
+
+from dip_client import (DipClient, aggregate_party_distribution_history, suggest_person_names, resolve_current_person_fraktion)
+from tool_contracts import PartyDistribution, PartyDistributionHistory, PersonInfoResult
 
 load_dotenv()
 
@@ -164,53 +160,40 @@ async def _prewarm_name_directory():
 
 
 
-
 @mcp.tool(description=(
-    "USE WHEN the user asks about aggregate party composition / distribution for "
-    "a Wahlperiode (e.g. 'party distribution in the 20th legislative session'). "
+    "USE for ANY party composition / distribution question — a single "
+    "Wahlperiode (pass a one-element list, e.g. [20]) or a comparison/scan "
+    "across several or all Wahlperioden (pass multiple, e.g. [18,19,20,21], "
+    "or omit for the full 1-21 history). Always returns a list of per-Wahlperiode "
+    "distributions, even when only one was requested. "
     "DO NOT USE for questions about one named person — that is get_person_info. "
-    "wahlperiode must be 1-21 (see schema constraints). `date_range` is accepted "
-    "but does NOT filter the aggregation — the DIP API has no role-tenure-scoped "
-    "date filter, so the result always covers the full Wahlperiode; a caveat is "
-    "returned in data_notes when date_range is supplied."
-    "DO NOT USE for role/title questions  — that is get_persons_by_role."))
-async def get_party_distribution(wahlperiode: int, date_range: DateRange | None = None) -> PartyDistribution:
-    if not (1 <= wahlperiode <= 21):
-        raise ValueError(f"implausible wahlperiode: {wahlperiode}")
+    "DO NOT USE for role/title questions — that is get_persons_by_role."))
+async def get_party_distribution(wahlperioden: list[int] | None = None) -> PartyDistributionHistory:
+    wps = wahlperioden or list(range(1, 22))
+    for wp in wps:
+        if not (1 <= wp <= 21):
+            raise ValueError(f"implausible wahlperiode: {wp}")
 
-    cache_key = f"party_dist:{wahlperiode}:{date_range.model_dump_json() if date_range else 'None'}"
+    cache_key = f"party_dist:{sorted(wps)}"
     cached = await _cache_get(cache_key)
     if cached is not None:
         logger.info("cache hit: %s", cache_key)
-        return PartyDistribution.model_validate(cached)
+        return PartyDistributionHistory.model_validate(cached)
 
-    distribution = await aggregate_party_distribution(dip, wahlperiode, date_range=date_range)
-    if distribution.unclassified_count > 0:
-        distribution.data_notes = (
-            f"{distribution.unclassified_count} of {distribution.total_persons} "
-            f"persons had no resolvable party affiliation for this Wahlperiode and are "
-            f"excluded from percentages.")
-    if date_range is not None:
-        note = ("Note: date_range was supplied but the underlying DIP API has no "
-                "role-tenure-scoped date filter, so this result reflects the full "
-                "Wahlperiode, not the specific date range.")
-        distribution.data_notes = ((distribution.data_notes or "") + " " + note).strip()
+    result = await aggregate_party_distribution_history(dip, wps)
 
-        # NEW: warn (not silently correct) when wahlperiode contradicts the date
-        from datetime import date as _date
-        try:
-            if date_range.start:
-                implied = _wahlperiode_for_date(_date.fromisoformat(date_range.start))
-                if implied is not None and implied != wahlperiode:
-                    warn = (f"Warning: the supplied date_range starts in Wahlperiode "
-                            f"{implied}, but wahlperiode={wahlperiode} was requested — "
-                            f"results are for Wahlperiode {wahlperiode}.")
-                    distribution.data_notes = ((distribution.data_notes or "") + " " + warn).strip()
-        except (ValueError, TypeError):
-            pass
+    if not result.distributions:
+        result.data_notes = f"No person records were found for wahlperioden={wps}."
+    for d in result.distributions:
+        if d.unclassified_count > 0:
+            d.data_notes = (
+                f"{d.unclassified_count} of {d.total_persons} persons had no "
+                f"resolvable party affiliation for this Wahlperiode and are "
+                f"excluded from percentages.")
 
-    await _cache_set(cache_key, distribution)
-    return distribution
+    await _cache_set(cache_key, result)
+    return result
+
 
 import difflib
 import re
@@ -316,7 +299,7 @@ async def get_persons_by_role(funktion: str, wahlperiode: int) -> dict:
             cached["_source"] = "cache"
         return cached
 
-    all_persons = await dip.get_all_persons_for_wahlperiode(wahlperiode)
+    all_persons = await dip.get_all_persons_for_wahlperioden([wahlperiode])
     target_norm = _normalize_role(funktion)
     matched_persons = []
     backfill_count = 0

@@ -89,11 +89,12 @@ FORCE_TOOL_USE_MESSAGE = SystemMessage(content=(
 
 MULTI_ENTITY_TOOL_USE_HINT = SystemMessage(content=(
     "If the user's question refers to more than one distinct entity of the "
-    "same kind (e.g. multiple Wahlperioden/election periods, multiple named "
-    "people), call this tool multiple times in this SAME response -- once "
-    "per distinct entity -- instead of answering for only one and waiting "
-    "for a follow-up question. Call it only once if the question names a "
-    "single entity."
+    "same kind (e.g. multiple named people), call this tool multiple times "
+    "in this SAME response -- once per distinct entity -- instead of "
+    "answering for only one and waiting for a follow-up question. Call it "
+    "only once if the question names a single entity. EXCEPTION: for "
+    "get_party_distribution specifically, multiple Wahlperioden always go "
+    "in ONE call as a list -- never call it more than once per turn."
 ))
 
 
@@ -223,8 +224,8 @@ are not sure a claim is supported, omit it rather than guessing."""
 COMPLETENESS_RUBRIC = """\
 Given the conversation and the tool-call evidence gathered so far, score
 0.0-1.0 how completely the evidence addresses the UNDERLYING DATA the
-question needs. A party-distribution question needs a distribution object
-with counts and percentages; a person-lookup or role-lookup question needs
+question needs. A party-distribution question needs a
+list of one or more distribution objects, each with counts and percentages; a person-lookup or role-lookup question needs
 either a resolved person/persons, or an explicit disambiguation/not-found
 result (e.g. an empty persons list together with a data_notes explanation)
 -- the empty-plus-explanation case counts as COMPLETE evidence, not as a
@@ -251,7 +252,7 @@ Wahlperiode is incomplete even when present.
 If the score is below 1.0, ALSO return missing_calls: the specific tool
 call(s) still needed to fill the gap, as {"tool": <name>, "args": {...}}.
 The available tools and their exact argument names are:
-- get_party_distribution: {"wahlperiode": <int 1-21>, "date_range": null}
+- get_party_distribution: {"wahlperioden": list[int], e.g. [20] or [18,19,20,21]}
 - get_persons_by_role: {"funktion": <str>, "wahlperiode": <int 1-21>}
 - get_person_info: {"name": <str>}
 Only include a call whose exact (tool, args) pair is NOT already present
@@ -376,15 +377,17 @@ def deterministic_fallback_answer(tool_results: list[dict]) -> str:
         output = entry.get("output", {})
         if not isinstance(output, dict) or "error" in output:
             continue
-        if "counts" in output and "percentages" in output:
-            label = f"Wahlperiode {output.get('wahlperiode')}" if output.get("wahlperiode") \
-                else str(output.get("date_range") or "")
-            lines.append(f"\n**{label}**")
-            for party, pct in output.get("percentages", {}).items():
-                count = output.get("counts", {}).get(party)
-                lines.append(f"- {party}: {count} seats ({pct}%)")
-            if output.get("data_notes"):
-                lines.append(f"- Note: {output['data_notes']}")
+
+        if "distributions" in output:
+            for dist in output.get("distributions", []):
+                label = f"Wahlperiode {dist.get('wahlperiode')}"
+                lines.append(f"\n**{label}**")
+                for party, pct in dist.get("percentages", {}).items():
+                    count = dist.get("counts", {}).get(party)
+                    lines.append(f"- {party}: {count} seats ({pct}%)")
+                if dist.get("data_notes"):
+                    lines.append(f"- Note: {dist['data_notes']}")
+
         elif output.get("person"):
             p = output["person"]
             name = " ".join(part for part in (p.get("vorname"), p.get("nachname")) if part)
@@ -645,8 +648,14 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                 f"get_persons_by_role with funktion=<the role> and wahlperiode={current_wp}. "
                 f"If the user NAMES a specific person, call get_person_info(name=...). "
                 f"Never name the person who holds a role from your own knowledge -- "
-                f"the tool resolves it from the data."
+                f"the tool resolves it from the data.\n"
+                f"get_party_distribution takes wahlperioden as a LIST -- pass a "
+                f"single-element list like [20] for one Wahlperiode, or multiple "
+                f"elements like [18,19,20,21] for a comparison or full-history scan. "
+                f"Never call it more than once per turn for a multi-Wahlperiode "
+                f"question -- put all the numbers in one list."
             ))
+            
             # Include text history for context, but skip raw ToolMessages to prevent 
             # Groq harmony formatter crashes on previous tool outputs.
             history = [
@@ -783,7 +792,7 @@ async def create_agent_graph(agent_system, config: dict | None = None,
 
             args = dict(call["args"])
 
-            if date_range is not None:
+            if date_range is not None and call["name"] != "get_party_distribution":
                 args.setdefault("date_range", date_range)
 
                 # get_persons_by_role / get_party_distribution take a
@@ -797,7 +806,10 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                         except ValueError:
                             resolved_wp = None
                         if resolved_wp is not None:
-                            args["wahlperiode"] = resolved_wp
+                            if call["name"] == "get_party_distribution":
+                                args["wahlperioden"] = [resolved_wp]
+                            else:
+                                args["wahlperiode"] = resolved_wp
             # Deterministic backstop: if the model repeats a call with the
             # exact same (tool, args) already made this turn, that means it
             # failed to act on retrieval_feedback -- a generic LLM compliance

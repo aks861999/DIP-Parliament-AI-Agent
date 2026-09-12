@@ -9,8 +9,7 @@ from decimal import Decimal
 
 import httpx
 from cache import Cache  # NEW
-from tool_contracts import DateRange, PartyDistribution
-from wahlperiode_utils import _wahlperiode_for_date
+from tool_contracts import PartyDistribution, PartyDistributionHistory
 
 logger = logging.getLogger(__name__)
 
@@ -231,15 +230,19 @@ class DipClient:
     async def get_person(self, person_id: str) -> dict:
         return await self._get(f"/person/{person_id}", {}, ttl_seconds=86400) 
 
-    async def search_persons_by_wahlperiode(self, wahlperiode: int, cursor: str | None = None) -> dict:
-        return await self._get("/person", {"f.wahlperiode": wahlperiode, "cursor": cursor})
+    async def search_persons_by_wahlperioden(self, wahlperioden: list[int], cursor: str | None = None) -> dict:
+        return await self._get("/person", {"f.wahlperiode": wahlperioden, "cursor": cursor})
 
-    async def get_all_persons_for_wahlperiode(self, wahlperiode: int) -> list[dict]:
-        """Fetches all persons for a given Wahlperiode, handling pagination."""
+    async def get_all_persons_for_wahlperioden(self, wahlperioden: list[int]) -> list[dict]:
+        """Fetches all persons across one or more Wahlperioden in ONE paginated
+        crawl, using the DIP API's repeatable f.wahlperiode array (OR semantics,
+        per the OpenAPI spec). A single-element list behaves exactly like the
+        old single-Wahlperiode call; multiple elements cover a comparison or
+        full-history scan in one crawl instead of one crawl PER Wahlperiode."""
         documents = []
         cursor = None
         while True:
-            page = await self.search_persons_by_wahlperiode(wahlperiode, cursor)
+            page = await self.search_persons_by_wahlperioden(wahlperioden, cursor)
             docs = page.get("documents", [])
             documents.extend(docs)
             cursor = page.get("cursor")
@@ -304,68 +307,46 @@ def resolve_current_person_fraktion(person: dict) -> str | None:
 
 
 
+async def aggregate_party_distribution_history(
+    client: "DipClient", wahlperioden: list[int]
+) -> PartyDistributionHistory:
+    all_persons = await client.get_all_persons_for_wahlperioden(wahlperioden)
 
-async def aggregate_party_distribution(
-    client: "DipClient", wahlperiode: int, date_range: DateRange | None = None
-) -> PartyDistribution:
-    counts: dict[str, int] = defaultdict(int)
-    unclassified = 0
-    total = 0
-    _started_at = time.monotonic()
+    per_wp_counts: dict[int, dict[str, int]] = {wp: defaultdict(int) for wp in wahlperioden}
+    per_wp_total: dict[int, int] = {wp: 0 for wp in wahlperioden}
+    per_wp_unclassified: dict[int, int] = {wp: 0 for wp in wahlperioden}
 
-    # Reuses the exact same cached, paginated fetch as get_persons_by_role.
-    # One canonical way to retrieve "all persons for a Wahlperiode" means
-    # role lookups and party-distribution lookups now share cache hits
-    # instead of each running an independent crawl of overlapping data.
-    all_persons = await client.get_all_persons_for_wahlperiode(wahlperiode)
+    for wp in wahlperioden:
+        for person in all_persons:
+            periods = person.get("wahlperiode")
+            periods_list = [periods] if isinstance(periods, int) else (periods or [])
+            if wp not in periods_list:
+                continue
+            per_wp_total[wp] += 1
+            fraktion = _fraktion_for_wahlperiode(person, wp)
+            if fraktion is None:
+                per_wp_unclassified[wp] += 1
+            else:
+                per_wp_counts[wp][fraktion] += 1
 
-    for person in all_persons:
-        total += 1
-        fraktion = _fraktion_for_wahlperiode(person, wahlperiode)
-        if fraktion is None:
-            unclassified += 1
-        else:
-            counts[fraktion] += 1
+    distributions = []
+    for wp in wahlperioden:
+        total = per_wp_total[wp]
+        if total == 0:
+            continue
+        classified_total = total - per_wp_unclassified[wp]
+        percentages = {}
+        if classified_total > 0:
+            percentages = {
+                p: float((Decimal(c) / Decimal(classified_total) * 100).quantize(Decimal("0.01")))
+                for p, c in per_wp_counts[wp].items()
+            }
+        distributions.append(PartyDistribution(
+            wahlperiode=wp, date_range=None, counts=dict(per_wp_counts[wp]),
+            percentages=percentages, total_persons=total,
+            unclassified_count=per_wp_unclassified[wp],
+        ))
 
-    if total == 0:
-        raise DipClientError(f"no person records found for wahlperiode={wahlperiode}")
-
-    classified_total = total - unclassified
-    percentages = {}
-    if classified_total > 0:
-        percentages = {
-            p: float((Decimal(c) / Decimal(classified_total) * 100).quantize(Decimal("0.01")))
-            for p, c in counts.items()
-        }
-
-    logger.info(
-        "aggregated wahlperiode=%s in %.2fs: total=%s unclassified=%s",
-        wahlperiode, time.monotonic() - _started_at, total, unclassified,
-    )
-
-    distribution = PartyDistribution(
-        wahlperiode=wahlperiode,
-        date_range=date_range,
-        counts=dict(counts),
-        percentages=percentages,
-        total_persons=total,
-        unclassified_count=unclassified,
-    )
-
-    if date_range is not None:
-        from datetime import date as _date
-        try:
-            if date_range.start:
-                implied = _wahlperiode_for_date(_date.fromisoformat(date_range.start))
-                if implied is not None and implied != wahlperiode:
-                    warn = (
-                        f"Warning: the supplied date_range starts in Wahlperiode "
-                        f"{implied}, but wahlperiode={wahlperiode} was requested; "
-                        f"results are for Wahlperiode {wahlperiode}."
-                    )
-                    distribution.data_notes = distribution.data_notes or warn.strip()
-        except (ValueError, TypeError):
-            pass
-
-    return distribution
-
+    logger.info("aggregated party distribution history for wahlperioden=%s: %d entries",
+                wahlperioden, len(distributions))
+    return PartyDistributionHistory(distributions=distributions)
