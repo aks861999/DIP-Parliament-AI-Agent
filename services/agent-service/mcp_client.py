@@ -46,10 +46,31 @@ async def start_mcp_session() -> None:
 
 
 async def stop_mcp_session() -> None:
+    global _ctx, _session, _tools_cache
     if _session is not None:
-        await _session.__aexit__(None, None, None)
+        try:
+            await _session.__aexit__(None, None, None)
+        except Exception:
+            logger.warning("error closing MCP session (likely already dead) — ignoring")
     if _ctx is not None:
-        await _ctx.__aexit__(None, None, None)
+        try:
+            await _ctx.__aexit__(None, None, None)
+        except Exception:
+            logger.warning("error closing MCP transport (likely already dead) — ignoring")
+    _session = None
+    _ctx = None
+    _tools_cache = None
+
+
+async def reconnect_mcp_session() -> None:
+    """Tears down a dead MCP session/transport and opens a fresh one.
+    Also clears _tools_cache — the cached tool wrappers close over the
+    OLD _session object, so they'd stay broken even after reconnecting
+    if the cache weren't cleared too."""
+    logger.warning("reconnecting MCP session after a detected transport failure...")
+    await stop_mcp_session()
+    await start_mcp_session()
+    logger.info("MCP session reconnected successfully")
 
 
 async def get_mcp_tools():

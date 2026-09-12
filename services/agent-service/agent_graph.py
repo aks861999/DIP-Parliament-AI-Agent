@@ -3,6 +3,8 @@ import logging
 import os
 from datetime import date
 from typing import Annotated, Literal
+import anyio
+import httpx
 
 import grounding
 from date_utils import (
@@ -317,6 +319,10 @@ Wahlperiode does NOT cover the question. Return the score, a one-sentence
 rationale, and relevant_indices."""
 
 
+
+
+
+
 def _current_turn_messages(messages: list) -> list:
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], HumanMessage):
@@ -466,6 +472,25 @@ class CompletenessVerdict(BaseModel):
 async def _judge(llm, rubric: str, payload: str, schema: type[BaseModel] = JudgeVerdict):
     return await llm.with_structured_output(schema).ainvoke(
         [("system", rubric), ("user", payload)])
+
+
+
+
+
+def _is_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, (
+        anyio.BrokenResourceError, anyio.ClosedResourceError, anyio.EndOfStream,
+        httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+        ConnectionError, OSError,
+    )):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "connection lost", "writing to socket", "closedresourceerror",
+        "brokenresourceerror", "broken pipe", "connection reset",
+        "connect_error", "remoteprotocolerror", "session is closed",
+    ))
+
 
 
 async def create_agent_graph(agent_system, config: dict | None = None,
@@ -816,12 +841,31 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                 # Log the raw tool output so you can verify the DIP API data in your terminal
                 logger.info("RAW TOOL OUTPUT (%s): %s", call["name"], json.dumps(output, default=str)[:2000])
             except Exception as e:
-                logger.exception("tool %s failed", call["name"])
-                output = {"error": f"{type(e).__name__}: {e}"}
-                tool_results.append({"tool": call["name"], "args": args, "output": output})
-                new_messages.append(ToolMessage(content=json.dumps(output), tool_call_id=call["id"], name=call["name"]))
-                call_thinking.append(f"❌ Called `{call['name']}({args})` → failed: {type(e).__name__}")
-                continue
+                if _is_transport_error(e):
+                    logger.warning("tool %s hit a dead MCP connection — reconnecting and retrying once", call["name"])
+                    try:
+                        from mcp_client import reconnect_mcp_session
+                        await reconnect_mcp_session()
+                        tools = await get_mcp_tools()
+                        retry_tool = next(t for t in tools if t.name == call["name"])
+                        raw_result = await retry_tool.ainvoke(args)
+                        output = _parse_mcp_tool_result(raw_result)
+                        logger.info("RAW TOOL OUTPUT (%s, after reconnect): %s",
+                                    call["name"], json.dumps(output, default=str)[:2000])
+                    except Exception as retry_exc:
+                        logger.exception("tool %s failed again after reconnect attempt", call["name"])
+                        output = {"error": f"{type(retry_exc).__name__}: {retry_exc}"}
+                        tool_results.append({"tool": call["name"], "args": args, "output": output})
+                        new_messages.append(ToolMessage(content=json.dumps(output), tool_call_id=call["id"], name=call["name"]))
+                        call_thinking.append(f"❌ Called `{call['name']}({args})` → failed after reconnect: {type(retry_exc).__name__}")
+                        continue
+                else:
+                    logger.exception("tool %s failed", call["name"])
+                    output = {"error": f"{type(e).__name__}: {e}"}
+                    tool_results.append({"tool": call["name"], "args": args, "output": output})
+                    new_messages.append(ToolMessage(content=json.dumps(output), tool_call_id=call["id"], name=call["name"]))
+                    call_thinking.append(f"❌ Called `{call['name']}({args})` → failed: {type(e).__name__}")
+                    continue
 
 
             tool_results.append({"tool": call["name"], "args": args, "output": output})
@@ -876,9 +920,25 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                 source_note = output.get("_source", "live DIP API") if isinstance(output, dict) else "live DIP API"
                 call_thinking.append(f"🔧 Called `{mc['tool']}({mc['args']})` → served from **{source_note}** (gap-sweep)")
             except Exception as e:
-                logger.exception("gap-sweep tool %s failed", mc["tool"])
-                output = {"error": f"{type(e).__name__}: {e}"}
-                call_thinking.append(f"❌ Gap-sweep call to `{mc['tool']}` failed: {type(e).__name__}")
+                if _is_transport_error(e):
+                    logger.warning("gap-sweep tool %s hit a dead MCP connection — reconnecting and retrying once", mc["tool"])
+                    try:
+                        from mcp_client import reconnect_mcp_session
+                        await reconnect_mcp_session()
+                        tools = await get_mcp_tools()
+                        retry_tool = next(t for t in tools if t.name == mc["tool"])
+                        raw_result = await retry_tool.ainvoke(mc["args"])
+                        output = _parse_mcp_tool_result(raw_result)
+                        source_note = output.get("_source", "live DIP API") if isinstance(output, dict) else "live DIP API"
+                        call_thinking.append(f"🔧 Called `{mc['tool']}({mc['args']})` → served from **{source_note}** (gap-sweep, after reconnect)")
+                    except Exception as retry_exc:
+                        logger.exception("gap-sweep tool %s failed again after reconnect attempt", mc["tool"])
+                        output = {"error": f"{type(retry_exc).__name__}: {retry_exc}"}
+                        call_thinking.append(f"❌ Gap-sweep call to `{mc['tool']}` failed after reconnect: {type(retry_exc).__name__}")
+                else:
+                    logger.exception("gap-sweep tool %s failed", mc["tool"])
+                    output = {"error": f"{type(e).__name__}: {e}"}
+                    call_thinking.append(f"❌ Gap-sweep call to `{mc['tool']}` failed: {type(e).__name__}")
             tool_results.append({"tool": mc["tool"], "args": mc["args"], "output": output})
             evidence_this_turn_after_call.add(mc_sig)
 
