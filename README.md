@@ -312,7 +312,7 @@ finally:
 
 A per-cache-key lock means only the first concurrent caller reaches the network; the rest wait and share its result. The cleanup ordering is deliberate, checking `.locked()` right after release avoids both a lock leak and a race where a waiting caller loses its lock.
 
-### 13. Client-side network throttling decoupled from any specific caller
+### 13. Client-side network throttling (DIP Enodia Anti-bot detection) decoupled from any specific caller
 
 **The problem:** Multiple code paths (pagination, retries, concurrent tool calls) can each originate a live DIP request, and every one needs to respect a minimum spacing to avoid tripping rate limits.
 

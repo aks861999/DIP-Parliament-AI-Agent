@@ -572,7 +572,32 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                     cache_reference = ("As of today, the current/most recently "
                                        f"constituted Wahlperiode is {current_wp}.")
                 except WahlperiodeResolutionError:
+                    current_wp = None
                     cache_reference = None
+
+                # Layer 1: any argument the code can resolve DETERMINISTICALLY
+                # for this turn is injected as an authoritative constraint --
+                # never left for the judge to infer from prose. Today that's
+                # just date->Wahlperiode; extend this block as more
+                # deterministic resolvers are added, without touching the
+                # rest of this function.
+                known_wp_for_turn = None
+                if date_range is not None:
+                    anchor_date_str = date_range.get("start") or date_range.get("end")
+                    if anchor_date_str:
+                        try:
+                            known_wp_for_turn = resolve_wahlperiode_from_date(date.fromisoformat(anchor_date_str))
+                        except ValueError:
+                            known_wp_for_turn = None
+                    if known_wp_for_turn is not None:
+                        cache_reference = (
+                            f"AUTHORITATIVE FACT: the user's question concerns {anchor_date_str}, "
+                            f"which falls in Wahlperiode {known_wp_for_turn}. This overrides any "
+                            f"assumption about 'current'/'now' -- evidence must be about Wahlperiode "
+                            f"{known_wp_for_turn} specifically, not the wall-clock current Wahlperiode "
+                            f"({current_wp}), unless the question also separately asks about 'now'."
+                        )
+
                 cache_verdict = await _judge(agent_system.judge_llm, CACHE_SUFFICIENCY_RUBRIC, json.dumps({
                     "conversation": _human_readable_transcript(history_for_cache, limit=6),
                     "existing_evidence": indexed_evidence,
@@ -588,6 +613,30 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                 # the prior context needed for charts and synthesis.
                 relevant_prior = [tool_results[i] for i in cache_verdict.relevant_indices
                                  if 0 <= i < len(tool_results)]
+
+                # Layer 2: DEFENSIVE VETO. Never trust that the judge actually
+                # honored the authoritative fact above -- verify it did. If a
+                # known deterministic Wahlperiode exists for this turn, any
+                # reused evidence whose own args disagree with it is
+                # discarded outright, regardless of what the judge said.
+                if known_wp_for_turn is not None:
+                    def _matches_known_wp(tr: dict) -> bool:
+                        args = tr.get("args", {})
+                        if "wahlperioden" in args:
+                            return args["wahlperioden"] == [known_wp_for_turn]
+                        if "wahlperiode" in args:
+                            return args["wahlperiode"] == known_wp_for_turn
+                        return True  # tool has no Wahlperiode arg -- nothing to veto
+
+                    filtered = [tr for tr in relevant_prior if _matches_known_wp(tr)]
+                    if len(filtered) != len(relevant_prior):
+                        logger.warning(
+                            "cache veto: judge selected evidence contradicting known "
+                            "Wahlperiode %d for this turn -- discarding and forcing a live call",
+                            known_wp_for_turn)
+                    relevant_prior = filtered
+                    if not relevant_prior:
+                        cache_verdict.score = 0.0
                 
                 if cache_verdict.score >= cfg["completeness_threshold"] and relevant_prior:
                     # Only reuse cached evidence when the judge gave us
