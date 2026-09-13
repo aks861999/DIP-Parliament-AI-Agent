@@ -49,6 +49,7 @@ def _build_judge_llm(api_key: str) -> ChatOpenAI:
         rate_limiter=_LLM_RATE_LIMITER,
         max_retries=int(_get_required_env("LLM_MAX_RETRIES")),
         timeout=60.0,
+        temperature=0.0,
     )
 
 
@@ -130,6 +131,7 @@ def _build_llm(api_key: str) -> ChatOpenAI:
         rate_limiter=_LLM_RATE_LIMITER,
         max_retries=int(_get_required_env("LLM_MAX_RETRIES")),
         timeout=60.0,
+        temperature=0.3,
     )
 
 REFLECTION_CONFIG = {
@@ -202,15 +204,16 @@ class QueryResponse(BaseModel):
 
 
 def _build_chart_data(scoped_results: list[dict], chart_type: str) -> dict | None:
-    """Pure presentation-layer transform: structured tool JSON -> chart
-    payload. Deliberately separate from retrieval/routing logic so both
-    the normal success path and the timeout-fallback path can reuse it."""
-    party_dist_by_key: dict[tuple, dict] = {}
+    party_dist_by_key: dict[int, dict] = {}
     for tr in scoped_results:
-        if tr.get("tool") == "get_party_distribution" and isinstance(tr.get("output"), dict):
-            output = tr["output"]
-            key = (output.get("wahlperiode"), json.dumps(output.get("date_range"), sort_keys=True))
-            entry = dict(output)
+        if tr.get("tool") != "get_party_distribution" or not isinstance(tr.get("output"), dict):
+            continue
+        output = tr["output"]
+        for dist in output.get("distributions", []):
+            if not isinstance(dist, dict):
+                continue
+            key = dist.get("wahlperiode")
+            entry = dict(dist)
             entry["chart_type"] = chart_type
             party_dist_by_key[key] = entry
 

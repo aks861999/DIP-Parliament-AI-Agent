@@ -49,6 +49,24 @@ _TOOL_CHOICE_DECLINE_MARKERS = (
     "tool_choice",
 )
 
+# Deterministic safety net for out_of_scope misclassification. The
+# classifier LLM occasionally mislabels an obviously in-scope question
+# (confirmed reproducible even at temperature=0 -- likely batching-induced
+# nondeterminism in the hosted MoE model). Rather than trust the LLM
+# alone for a decision this consequential, veto an out_of_scope verdict
+# whenever the message contains strong, unambiguous domain keywords.
+# False positives here are cheap (worst case: a live tool call that finds
+# no matching data and reports so honestly); false negatives silently
+# refuse a real question, which is the worse failure mode.
+import re
+
+_IN_SCOPE_OVERRIDE_RE = re.compile(
+    r"\b(cdu|csu|spd|afd|grüne|grune|fdp|die linke|bundestag|"
+    r"wahlperiode|bundeskanzler|bundespräsident|parliament|"
+    r"legislative period|election period|\bparty\b|\bparties\b|"
+    r"\bpartei\b|\bseats?\b|\bcoalition\b)",
+    re.IGNORECASE)
+
 
 def _extract_failed_generation(error: Exception) -> str | None:
     """Extract the model's intended text from a Groq 'tool_choice=required'
@@ -193,6 +211,15 @@ when the raw person.fraktion field is empty -- resolved_fraktion is
 already computed from their role history for exactly that case. If no
 tool output is provided, say so honestly rather than answering from
 general knowledge.
+
+The user may use colloquial or informal terms in their question (e.g.
+"population," "size," "members," "how big") to refer to a party's seat/
+member count in the data. Interpret these naturally as referring to the
+counts/percentages fields -- the exact word does NOT need to appear
+verbatim in the tool output, only the numbers you state need to be
+grounded there. Never refuse to answer or claim the data "doesn't show"
+something just because the user's wording differs from the JSON's field
+names; only refuse when the underlying NUMBER or FACT itself is missing.
 
 Write like you're briefing someone, not printing a report: open with a
 short conversational sentence or two stating the headline finding in
@@ -361,6 +388,51 @@ def _parse_mcp_tool_result(raw_result) -> dict | list:
     raise TypeError(f"unexpected MCP tool result type: {type(raw_result)!r}")
 
 
+
+def _decompose_tool_result(call_name: str, args: dict, output) -> list[tuple[dict, object]]:
+    """get_party_distribution can return multiple Wahlperioden in one
+    call; split them into separate (args, output) pairs here so each
+    stored tool_results entry maps to exactly ONE Wahlperiode. Without
+    this, reusing "the one relevant entry" for a later question about a
+    SINGLE Wahlperiode drags every other Wahlperiode bundled into that
+    same original call along with it -- into cache-reuse, completeness
+    tracking, and chart rendering alike. A single-element original call
+    decomposes into exactly one entry, identical to prior behavior."""
+    if call_name != "get_party_distribution" or not isinstance(output, dict):
+        return [(args, output)]
+    distributions = output.get("distributions")
+    if not isinstance(distributions, list) or not distributions:
+        return [(args, output)]
+    pairs = []
+    for dist in distributions:
+        if not isinstance(dist, dict) or "wahlperiode" not in dist:
+            continue
+        pairs.append((
+            {"wahlperioden": [dist["wahlperiode"]]},
+            {"distributions": [dist], "data_notes": output.get("data_notes")},
+        ))
+    return pairs or [(args, output)]
+
+
+
+
+def _decompose_call_args(call_name: str, args: dict) -> list[dict]:
+    """Mirror of _decompose_tool_result, but operating on ARGS before the
+    tool is even invoked -- lets the dedup check compare a combined
+    multi-Wahlperiode proposal against already-fetched evidence at the
+    same per-Wahlperiode granularity turn_tool_results now stores."""
+    if call_name != "get_party_distribution":
+        return [args]
+    wps = args.get("wahlperioden")
+    if not isinstance(wps, list) or not wps:
+        return [args]
+    return [{"wahlperioden": [wp]} for wp in wps]
+
+
+
+
+
+
 def deterministic_fallback_answer(tool_results: list[dict]) -> str:
     """Presentation-only, LLM-free formatter used when the synthesis model
     call itself fails (rate limit, timeout, outage) but valid structured
@@ -421,6 +493,10 @@ class AgentState(TypedDict):
     intent: Literal["person_lookup", "party_distribution", "mixed", "conversation_meta",
                     "out_of_scope", "role_lookup"] | None
     raw_date_expression: str | None
+    date_range: dict | None  # resolved by tool_selector_node; consumed by
+                              # reflection_node so it can inject the SAME
+                              # deterministic Wahlperiode fact the cache
+                              # check uses, instead of only knowing "current"
     needs_clarification: str | None
     tool_results: list[dict]
     reflection_iterations: int
@@ -526,6 +602,17 @@ async def create_agent_graph(agent_system, config: dict | None = None,
         # rare-path safety retry isn't worth its token cost. If false
         # out_of_scope becomes a real problem, tighten SUPERVISOR_PROMPT's
         # examples instead of re-adding a second call.
+        current_user_message = state["messages"][-1].content if state["messages"] else ""
+        if extraction.intent == "out_of_scope" and _IN_SCOPE_OVERRIDE_RE.search(current_user_message):
+            logger.warning(
+                "supervisor classified out_of_scope but message contains strong "
+                "domain keywords -- overriding to party_distribution: %r",
+                current_user_message)
+            extraction = SupervisorExtraction(
+                intent="party_distribution",
+                raw_date_expression=extraction.raw_date_expression,
+            )
+
         logger.info("intent=%s date_expr=%r", extraction.intent, extraction.raw_date_expression)
         thinking = [f"🧭 Classified as **{extraction.intent}**"]
         if extraction.raw_date_expression:
@@ -540,7 +627,7 @@ async def create_agent_graph(agent_system, config: dict | None = None,
             # Preserve prior tool results so follow-up UI/clarification requests
             # can still be answered or visualized by the frontend.
             return {"tool_results": state.get("tool_results", []), "needs_clarification": None,
-                    "direct_answer": None}
+                    "direct_answer": None, "date_range": None}
 
         date_range = None
         if state["raw_date_expression"]:
@@ -548,7 +635,7 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                 date_range = await resolve_date_expression(agent_system.judge_llm, state["raw_date_expression"])
             except DateResolutionAmbiguousError as err:
                 logger.warning("ambiguous date: %r", err.expression)
-                return {"needs_clarification": f"Could you clarify the date you mean by '{err.expression}'?"}
+                return {"needs_clarification": f"Could you clarify the date you mean by '{err.expression}'?", "date_range": None}
 
         tool_results = list(state.get("tool_results") or [])
         prior_count = len(tool_results)
@@ -648,6 +735,7 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                     # comparison chart to appear on a plain "WP 20" question.
                     return {"tool_results": tool_results, "needs_clarification": None,
                             "direct_answer": None, "turn_tool_results": relevant_prior,
+                            "date_range": date_range,
                             "thinking_log": (state.get("thinking_log") or [])
                                 + [(f"♻️ Reused {len(relevant_prior)} already-fetched result(s) "
                                     f"from this conversation — no new API call needed "
@@ -808,21 +896,21 @@ async def create_agent_graph(agent_system, config: dict | None = None,
         # whose answer is already in the conversation from a prior tool call).
         if direct_answer:
             return {"tool_results": tool_results, "needs_clarification": None,
-                    "direct_answer": direct_answer}
+                    "direct_answer": direct_answer, "date_range": date_range}
 
         if response is None:
             if tool_results:
                 logger.info("no further tool call available/needed (intent=%s); "
                            "proceeding to synthesis with existing tool evidence", state["intent"])
                 return {"tool_results": tool_results, "needs_clarification": None,
-                        "direct_answer": None}
+                        "direct_answer": None, "date_range": date_range}
             # Model refused all forced attempts and there is no evidence to
             # fall back on. Tell the user honestly instead of 503ing -- and
             # never surface the model's ungrounded answer.
             logger.error("LLM refused to call a tool with no evidence "
                          "(intent=%s); returning honest failure", state["intent"])
             return {"tool_results": [], "needs_clarification": RETRIEVAL_FAILURE_ANSWER,
-                    "direct_answer": None}
+                    "direct_answer": None, "date_range": date_range}
 
         new_messages: list = [response]
         needs_clarification = None
@@ -841,8 +929,9 @@ async def create_agent_graph(agent_system, config: dict | None = None,
 
             args = dict(call["args"])
 
-            if date_range is not None and call["name"] != "get_party_distribution":
-                args.setdefault("date_range", date_range)
+            if date_range is not None:
+                if call["name"] != "get_party_distribution":
+                    args.setdefault("date_range", date_range)
 
                 # get_persons_by_role / get_party_distribution take a
                 # wahlperiode int, not a date -- resolve it deterministically
@@ -868,13 +957,20 @@ async def create_agent_graph(agent_system, config: dict | None = None,
             # (state["missing_calls"]) and, if so, fetch that instead of
             # silently stalling. Generalizes to any tool/any missing
             # argument the judge identifies -- not a hardcoded case.
-            sig = (call["name"], json.dumps(args, sort_keys=True))
+            known_tool_names = {t.name for t in tools}
             evidence_this_turn = {
                 (tr["tool"], json.dumps(tr.get("args", {}), sort_keys=True)): tr
                 for tr in (state.get("turn_tool_results") or [])
             }
-            known_tool_names = {t.name for t in tools}
-            if sig in evidence_this_turn:
+            sub_args_list = _decompose_call_args(call["name"], args)
+            sub_sigs = [(call["name"], json.dumps(sub_args, sort_keys=True)) for sub_args in sub_args_list]
+            missing_sub_args = [sub_args for sub_args, s in zip(sub_args_list, sub_sigs) if s not in evidence_this_turn]
+            reused_sub_outputs = [evidence_this_turn[s]["output"] for s in sub_sigs if s in evidence_this_turn]
+
+            if reused_sub_outputs and not missing_sub_args:
+                # FULLY covered: every sub-part of this proposed call already
+                # exists in this turn's evidence. Redirect to a judge-identified
+                # gap if one exists, else just reuse the existing output(s).
                 next_gap = next(
                     (mc for mc in (state.get("missing_calls") or [])
                      if mc["tool"] in known_tool_names
@@ -882,23 +978,50 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                     None,
                 )
                 if next_gap is not None:
-                    logger.warning("dedup: model repeated %s; deterministically "
-                                   "fetching judge-identified gap %s instead", sig, next_gap)
+                    logger.warning("dedup: model repeated %s (fully covered); deterministically "
+                                   "fetching judge-identified gap %s instead", sub_sigs, next_gap)
                     call = {**call, "name": next_gap["tool"]}
                     args = dict(next_gap["args"])
                 else:
-                    logger.warning("dedup: model repeated %s; reusing prior result", sig)
+                    logger.warning("dedup: model repeated %s (fully covered); reusing prior result(s)", sub_sigs)
+                    if call["name"] == "get_party_distribution" and len(reused_sub_outputs) > 1:
+                        merged = []
+                        for out in reused_sub_outputs:
+                            if isinstance(out, dict):
+                                merged.extend(out.get("distributions", []))
+                        reused_output = {"distributions": merged, "data_notes": None}
+                    else:
+                        reused_output = reused_sub_outputs[0]
                     new_messages.append(ToolMessage(
-                        content=json.dumps(evidence_this_turn[sig]["output"]),
+                        content=json.dumps(reused_output),
                         tool_call_id=call["id"], name=call["name"]))
-                    call_thinking.append(f"♻️ Skipped duplicate call to `{call['name']}` — reused this turn's own result")
+                    call_thinking.append(f"♻️ Skipped duplicate call to `{call['name']}` — reused this turn's own result(s)")
                     continue
+            elif reused_sub_outputs and missing_sub_args:
+                # PARTIALLY covered: narrow the live call to only the
+                # genuinely-missing sub-parts, and merge the reused sub-parts
+                # back in after the call succeeds so the model still sees
+                # the full combined answer it originally asked for.
+                logger.warning("dedup: model repeated %s (partially covered); narrowing "
+                               "call to only the missing sub-parts %s", sub_sigs, missing_sub_args)
+                if call["name"] == "get_party_distribution":
+                    args = {"wahlperioden": [a["wahlperioden"][0] for a in missing_sub_args]}
+            # else: nothing covered yet -- proceed with the full original call.
 
             matching_tool = next(t for t in tools if t.name == call["name"])
             logger.info("calling tool %s(%s)", call["name"], args)
             try:
                 raw_result = await matching_tool.ainvoke(args)
                 output = _parse_mcp_tool_result(raw_result)
+                if reused_sub_outputs and call["name"] == "get_party_distribution" and isinstance(output, dict):
+                    # Merge freshly-fetched distributions with the reused ones
+                    # so downstream code (ToolMessage, tool_results, chart data)
+                    # sees the complete combined result, not just the delta.
+                    merged = list(output.get("distributions", []))
+                    for out in reused_sub_outputs:
+                        if isinstance(out, dict):
+                            merged.extend(out.get("distributions", []))
+                    output = {"distributions": merged, "data_notes": output.get("data_notes")}
                 # Log the raw tool output so you can verify the DIP API data in your terminal
                 logger.info("RAW TOOL OUTPUT (%s): %s", call["name"], json.dumps(output, default=str)[:2000])
             except Exception as e:
@@ -929,10 +1052,11 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                     continue
 
 
-            tool_results.append({"tool": call["name"], "args": args, "output": output})
             new_messages.append(ToolMessage(content=json.dumps(output), tool_call_id=call["id"], name=call["name"]))
             source_note = output.get("_source", "live DIP API") if isinstance(output, dict) else "live DIP API"
             call_thinking.append(f"🔧 Called `{call['name']}({args})` → served from **{source_note}**")
+            for decomposed_args, decomposed_output in _decompose_tool_result(call["name"], args, output):
+                tool_results.append({"tool": call["name"], "args": decomposed_args, "output": decomposed_output})
 
             # Generic, domain-agnostic post-call step: if the tool returned a
 
@@ -1000,7 +1124,8 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                     logger.exception("gap-sweep tool %s failed", mc["tool"])
                     output = {"error": f"{type(e).__name__}: {e}"}
                     call_thinking.append(f"❌ Gap-sweep call to `{mc['tool']}` failed: {type(e).__name__}")
-            tool_results.append({"tool": mc["tool"], "args": mc["args"], "output": output})
+            for decomposed_args, decomposed_output in _decompose_tool_result(mc["tool"], mc["args"], output):
+                tool_results.append({"tool": mc["tool"], "args": decomposed_args, "output": decomposed_output})
             evidence_this_turn_after_call.add(mc_sig)
 
         # Evidence fetched during THIS invocation only (may be called more than
@@ -1032,8 +1157,11 @@ async def create_agent_graph(agent_system, config: dict | None = None,
 
         return {"messages": new_messages, "tool_results": tool_results,
                 "needs_clarification": needs_clarification, "direct_answer": None,
-                "turn_tool_results": turn_tool_results,
+                "turn_tool_results": turn_tool_results, "date_range": date_range,
                 "thinking_log": (state.get("thinking_log") or []) + call_thinking}
+
+
+
 
     @observe()
     async def reflection_node(state: AgentState) -> dict:
@@ -1043,21 +1171,37 @@ async def create_agent_graph(agent_system, config: dict | None = None,
                 or not state["tool_results"]):
             return {"completeness_score": 1.0, "reflection_iterations": iterations}
 
-        # REVERTED: a structural "exactly one tool call = complete" check
-        # was tried here to save a judge call. It broke every comparison
-        # query ("compare WP 20 and 21"), because the model's first pass
-        # always extracts only ONE argument -- it relies on THIS judge to
-        # notice the gap and loop back to tool_selector for the second one.
-        # Skipping the judge after the first call permanently disabled
-        # that loop. Token savings are not worth silently wrong answers;
-        # always judge for these intents.
         conversation = _human_readable_transcript(_current_turn_messages(state["messages"]))
         try:
             current_wp = resolve_current_wahlperiode()
             reference = ("As of today, the current/most recently constituted "
                          f"Wahlperiode is {current_wp}.")
         except WahlperiodeResolutionError:
+            current_wp = None
             reference = None
+
+        # Layer 1: same deterministic-fact injection as tool_selector_node's
+        # cache check -- if this turn concerns a specific date, that date's
+        # resolved Wahlperiode is authoritative and overrides "current".
+        known_wp_for_turn = None
+        date_range = state.get("date_range")
+        if date_range is not None:
+            anchor_date_str = date_range.get("start") or date_range.get("end")
+            if anchor_date_str:
+                try:
+                    known_wp_for_turn = resolve_wahlperiode_from_date(date.fromisoformat(anchor_date_str))
+                except ValueError:
+                    known_wp_for_turn = None
+            if known_wp_for_turn is not None:
+                reference = (
+                    f"AUTHORITATIVE FACT: the user's question concerns {anchor_date_str}, "
+                    f"which falls in Wahlperiode {known_wp_for_turn}. This overrides any "
+                    f"assumption about 'current'/'now' -- evidence about Wahlperiode "
+                    f"{known_wp_for_turn} specifically is what answers this question, NOT "
+                    f"the wall-clock current Wahlperiode ({current_wp}), unless the "
+                    f"question also separately asks about 'now'."
+                )
+
         payload = json.dumps({
             "conversation": conversation,
             "tool_results": state["tool_results"],
@@ -1069,6 +1213,33 @@ async def create_agent_graph(agent_system, config: dict | None = None,
             logger.info("completeness=%.2f (%s) missing_calls=%s iteration=%d",
                         verdict.score, verdict.rationale, verdict.missing_calls, iterations)
             incomplete = verdict.score < cfg["completeness_threshold"]
+
+            # Layer 2: DEFENSIVE VETO. If evidence for the deterministically
+            # known-correct Wahlperiode already exists, this question IS
+            # answerable regardless of what the judge concluded -- never let
+            # it demand a different Wahlperiode because it confused a
+            # specific date with "current".
+            if known_wp_for_turn is not None:
+                has_correct_evidence = any(
+                    tr.get("tool") == "get_party_distribution"
+                    and tr.get("args", {}).get("wahlperioden") == [known_wp_for_turn]
+                    and isinstance(tr.get("output"), dict)
+                    and "error" not in tr["output"]
+                    for tr in state["tool_results"]
+                )
+                if has_correct_evidence and incomplete:
+                    logger.warning(
+                        "completeness veto: judge marked evidence for the known-correct "
+                        "Wahlperiode %d incomplete -- overriding to complete", known_wp_for_turn)
+                    incomplete = False
+                    verdict.score = 1.0
+                    verdict.rationale = (
+                        f"Overridden: evidence for Wahlperiode {known_wp_for_turn} "
+                        f"(the deterministically resolved Wahlperiode for this date) "
+                        f"already exists and answers the question."
+                    )
+                    verdict.missing_calls = []
+
             thinking = [f"🔍 Completeness check: {verdict.score:.0%} — {verdict.rationale}"]
             if incomplete and verdict.missing_calls:
                 thinking.append(f"➕ Still need: {[mc.tool for mc in verdict.missing_calls]}")
@@ -1080,6 +1251,14 @@ async def create_agent_graph(agent_system, config: dict | None = None,
         except Exception:
             logger.exception("completeness judge failed; treating existing evidence as sufficient")
             return {"completeness_score": 1.0, "reflection_iterations": iterations, "missing_calls": None}
+
+
+
+
+
+
+
+
 
     def route_after_reflection(state: AgentState) -> Literal["incomplete", "complete"]:
         if state.get("needs_clarification"):
@@ -1227,7 +1406,7 @@ async def run_agent_query(agent_graph, query: str, thread_id: str) -> dict:
 
     initial_state: AgentState = {
         "messages": [HumanMessage(content=query)],
-        "intent": None, "raw_date_expression": None, "needs_clarification": None,
+        "intent": None, "raw_date_expression": None, "date_range": None, "needs_clarification": None,
         "tool_results": prior_tool_results, "reflection_iterations": 0,
         "completeness_score": None, "retrieval_feedback": None,
         "missing_calls": None,

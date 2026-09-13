@@ -9,6 +9,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 

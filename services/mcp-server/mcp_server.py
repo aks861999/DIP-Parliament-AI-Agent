@@ -174,24 +174,36 @@ async def get_party_distribution(wahlperioden: list[int] | None = None) -> Party
         if not (1 <= wp <= 21):
             raise ValueError(f"implausible wahlperiode: {wp}")
 
-    cache_key = f"party_dist:{sorted(wps)}"
-    cached = await _cache_get(cache_key)
-    if cached is not None:
-        logger.info("cache hit: %s", cache_key)
-        return PartyDistributionHistory.model_validate(cached)
+    # Cache PER Wahlperiode, not per whole request. A request for [20, 21]
+    # and an earlier request for [20] alone must share the SAME underlying
+    # cache entry for WP20 -- otherwise every new combination of Wahlperioden
+    # is treated as an unrelated cache key, forcing a live refetch of data
+    # that's already sitting in Redis under a different key shape.
+    distributions: dict[int, PartyDistribution] = {}
+    missing_wps: list[int] = []
+    for wp in wps:
+        wp_cache_key = f"party_dist:{wp}"
+        cached = await _cache_get(wp_cache_key)
+        if cached is not None:
+            distributions[wp] = PartyDistribution.model_validate(cached)
+        else:
+            missing_wps.append(wp)
 
-    result = await aggregate_party_distribution_history(dip, wps)
+    if missing_wps:
+        fresh = await aggregate_party_distribution_history(dip, missing_wps)
+        for d in fresh.distributions:
+            if d.unclassified_count > 0:
+                d.data_notes = (
+                    f"{d.unclassified_count} of {d.total_persons} persons had no "
+                    f"resolvable party affiliation for this Wahlperiode and are "
+                    f"excluded from percentages.")
+            distributions[d.wahlperiode] = d
+            await _cache_set(f"party_dist:{d.wahlperiode}", d)
 
-    if not result.distributions:
+    ordered = [distributions[wp] for wp in wps if wp in distributions]
+    result = PartyDistributionHistory(distributions=ordered)
+    if not ordered:
         result.data_notes = f"No person records were found for wahlperioden={wps}."
-    for d in result.distributions:
-        if d.unclassified_count > 0:
-            d.data_notes = (
-                f"{d.unclassified_count} of {d.total_persons} persons had no "
-                f"resolvable party affiliation for this Wahlperiode and are "
-                f"excluded from percentages.")
-
-    await _cache_set(cache_key, result)
     return result
 
 
