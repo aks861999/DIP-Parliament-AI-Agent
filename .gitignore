@@ -86,3 +86,12 @@ volumes/
 .DS_Store
 .vscode/
 .idea/
+
+
+
+services/full-stack-agent-app/.env.local
+
+services/full-stack-agent-app/.next
+
+
+services/full-stack-agent-app/node_modules/

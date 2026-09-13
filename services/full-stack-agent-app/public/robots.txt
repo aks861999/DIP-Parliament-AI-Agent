@@ -1,0 +1,6 @@
+# services/full-stack-agent-app/public/robots.txt
+# Placeholder file so the Dockerfile's `COPY --from=builder /app/public`
+# step has a directory to copy -- Next.js's standalone build expects a
+# public/ folder to exist even if you add no real static assets.
+User-agent: *
+Disallow: /

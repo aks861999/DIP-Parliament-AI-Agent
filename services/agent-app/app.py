@@ -17,6 +17,20 @@ logger = logging.getLogger(__name__)
 
 AGENT_SERVICE_URL = os.environ["AGENT_SERVICE_URL"]
 
+EXAMPLE_PROMPTS = {
+    "Politicians": [
+        "Who is Angela Merkel?",
+        "Who is Friedrich Merz?",
+    ],
+    "Parties": [
+        "Party distribution in Wahlperiode 20",
+        "Compare CDU/CSU across Wahlperiode 19, 20, and 21",
+    ],
+    "Roles": [
+        "Who is the current Bundeskanzler?",
+    ],
+}
+
 
 @st.cache_resource(show_spinner=False)
 def _get_http_client() -> httpx.Client:
@@ -51,7 +65,6 @@ def _wake_agent_service(max_wait: float = 60.0, poll_interval: float = 3.0) -> b
     return False
 
 
-
 def _request_with_retry(method: str, url: str, retries: int = 3, **kwargs) -> httpx.Response:
     client = _get_http_client()
     for attempt in range(retries):
@@ -59,24 +72,22 @@ def _request_with_retry(method: str, url: str, retries: int = 3, **kwargs) -> ht
             response = client.request(method, url, **kwargs)
             if response.status_code in (502, 503, 504):
                 logger.warning("agent-service returned %s (attempt %d/%d) — waking via GET /health...",
-                               response.status_code, attempt + 1, retries)
+                                response.status_code, attempt + 1, retries)
                 _wake_agent_service()
                 continue
             response.raise_for_status()
             return response
         except httpx.TransportError:
             logger.warning("agent-service unreachable (attempt %d/%d) — waking via GET /health...",
-                           attempt + 1, retries)
+                            attempt + 1, retries)
             _wake_agent_service()
             continue
     raise RuntimeError("agent-service did not respond after wake attempts")
 
 
-
 def run_query(query: str, thread_id: str) -> dict:
     response = _request_with_retry("POST", "/query", json={"query": query, "thread_id": thread_id})
     return response.json()
-
 
 
 def get_thread_messages(thread_id: str) -> list[dict]:
@@ -98,12 +109,10 @@ def build_party_chart(chart_data):
     if not chart_data:
         return None
 
-    # Normalize to a list of distribution dicts + a chart_type
     if isinstance(chart_data, dict) and chart_data.get("type") == "party_distribution":
         distributions = chart_data.get("distributions") or []
         chart_type = chart_data.get("chart_type", "bar")
     elif isinstance(chart_data, dict) and "counts" in chart_data:
-        # Legacy single-distribution row from the DB
         distributions = [chart_data]
         chart_type = chart_data.get("chart_type", "bar")
     else:
@@ -136,7 +145,6 @@ def build_party_chart(chart_data):
     return chart_fn(df, **kwargs)
 
 
-
 def _check_password() -> bool:
     if st.session_state.get("authenticated"):
         return True
@@ -151,11 +159,25 @@ def _check_password() -> bool:
     return False
 
 
+def _submit_query(query: str) -> None:
+    """Shared entry point for both st.chat_input and the starter-prompt
+    buttons, so a clicked example behaves identically to typed input."""
+    if not st.session_state.thread_persisted:
+        db_utils.create_thread(st.session_state.thread_id, title=query)
+        st.session_state.thread_persisted = True
+    st.session_state.chat_messages.append({"role": "user", "content": query})
+    st.session_state.pending_query = query
+    st.rerun()
+
 
 def main():
     if not _check_password():
         return
-    st.set_page_config(page_title="DIP Parliamentary Agent")
+    st.set_page_config(page_title="DIP Parliamentary Agent", page_icon="🏛️")
+    st.markdown(
+        "<style>div.stButton > button {border-left: 3px solid #FFCC00;}</style>",
+        unsafe_allow_html=True,
+    )
     _ensure_db_initialized()
 
     query_params = st.query_params
@@ -163,7 +185,6 @@ def main():
         if "thread" in query_params:
             st.session_state.thread_id = query_params["thread"]
             st.session_state.thread_persisted = True
-            # Initialize empty; we will populate it from DB below to avoid duplicates
             st.session_state.chat_messages = []
             st.session_state.loaded_from_db = False
             logger.info("Loading chat session: thread_id=%s", st.session_state.thread_id)
@@ -174,7 +195,6 @@ def main():
             st.session_state.loaded_from_db = True
             logger.info("New chat session: thread_id=%s", st.session_state.thread_id)
 
-    # Load messages from DB only once per thread to prevent duplicates on rerun
     if not st.session_state.get("loaded_from_db", False):
         try:
             db_msgs = get_thread_messages(st.session_state.thread_id)
@@ -189,6 +209,22 @@ def main():
     with st.sidebar:
         st.subheader("Conversations")
         st.caption("Public demo — every visitor can see every thread here.")
+        with st.expander("ℹ️ About this data"):
+            st.markdown(
+                "Answers come from **DIP**, the Bundestag's own open-data API — "
+                "no general knowledge, no guessing. Covers politicians' bios/party "
+                "history, party seat composition by *Wahlperiode* (electoral term), "
+                "and who holds a given office. It doesn't cover current events, "
+                "opinions, or non-German politics."
+            )
+        with st.expander("🔍 How this agent stays honest"):
+            st.markdown(
+                "- 🧭 **Classified as** — how your question was routed\n"
+                "- 🔧 **Tool call** — a real, live query to DIP\n"
+                "- 🔍 **Completeness check** — verifies nothing needed is missing\n"
+                "- ✅ **Faithfulness check** — verifies the answer matches the data\n\n"
+                "Expand **🧠 Thinking** under any answer to watch these run."
+            )
         if st.button("+ New chat", use_container_width=True):
             st.session_state.thread_id = str(uuid.uuid4())
             st.session_state.thread_persisted = False
@@ -212,6 +248,23 @@ def main():
 
     st.title("DIP Parliamentary Agent")
 
+    if not st.session_state.chat_messages and not st.session_state.get("pending_query"):
+        st.markdown(
+            "I answer questions about the German Bundestag using **DIP**, the "
+            "Bundestag's own open-data API — politicians' bios and party "
+            "history, party seat composition by Wahlperiode (electoral term), "
+            "and who holds a given office. I don't answer from general "
+            "knowledge; every fact traces back to a live DIP query.\n\n"
+            "Try one of the examples below, or ask your own."
+        )
+        for category, prompts in EXAMPLE_PROMPTS.items():
+            st.caption(category)
+            cols = st.columns(len(prompts))
+            for col, prompt in zip(cols, prompts):
+                if col.button(prompt, key=f"starter_{prompt}", use_container_width=True):
+                    _submit_query(prompt)
+        st.divider()
+
     for idx, msg in enumerate(st.session_state.chat_messages):
         with st.chat_message(msg["role"]):
             if msg.get("thinking_log"):
@@ -222,18 +275,11 @@ def main():
             if msg.get("chart_data"):
                 fig = build_party_chart(msg["chart_data"])
                 if fig is not None:
-                    st.plotly_chart(fig, use_container_width=True,
-                                    key=f"history_plot_{idx}")
+                    st.plotly_chart(fig, use_container_width=True, key=f"history_plot_{idx}")
 
     query = st.chat_input("Ask about German parliamentary data...")
     if query:
-        if not st.session_state.thread_persisted:
-            db_utils.create_thread(st.session_state.thread_id, title=query)
-            st.session_state.thread_persisted = True
-
-        st.session_state.chat_messages.append({"role": "user", "content": query})
-        st.session_state.pending_query = query
-        st.rerun()
+        _submit_query(query)
 
     if st.session_state.get("pending_query"):
         pending = st.session_state.pending_query
@@ -257,7 +303,7 @@ def main():
             st.markdown(answer)
 
             msg = {"role": "assistant", "content": answer, "chart_data": chart_data,
-                "thinking_log": thinking_log}
+                   "thinking_log": thinking_log}
 
             fig = build_party_chart(chart_data) if chart_data else None
             if fig is not None:
@@ -266,9 +312,7 @@ def main():
 
             st.session_state.chat_messages.append(msg)
             db_utils.touch_thread(st.session_state.thread_id)
-        st.session_state.pending_query = None
-
-
+            st.session_state.pending_query = None
 
 
 if __name__ == "__main__":

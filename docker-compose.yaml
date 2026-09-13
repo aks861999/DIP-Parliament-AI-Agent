@@ -1,9 +1,10 @@
 # docker-compose.yaml
-# Four containers: postgres, redis, mcp-server, agent-app, talking over a
-# plain Docker bridge network. mcp-server/agent-app use SSE instead of
-# stdio when containerized. No orchestrator beyond docker compose — no
-# Kubernetes anywhere. This is a required deliverable for production, but
-# the primary way to run this project day-to-day is the *_setup_and_run.sh
+# Five containers: postgres, redis, mcp-server, agent-service, agent-app,
+# plus the new full-stack-agent-app, all talking over a plain Docker
+# bridge network. mcp-server/agent-app use SSE instead of stdio when
+# containerized. No orchestrator beyond docker compose, no Kubernetes
+# anywhere. This is a required deliverable for production, but the
+# primary way to run this project day-to-day is the *_setup_and_run.sh
 # scripts against natively-installed or `docker compose up postgres redis`
 # Postgres/Redis (see README.md).
 #
@@ -113,15 +114,34 @@ services:
     networks:
       - dip-agent
 
+
+  full-stack-agent-app:
+    build:
+      context: ./services/full-stack-agent-app
+    ports:
+    - "3000:3000"
+    environment:
+    - AGENT_SERVICE_URL=http://agent-service:8000
+    - APP_SHARED_SECRET=${APP_SHARED_SECRET}
+    - APP_PASSWORD=${APP_PASSWORD}
+    - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent-service:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+    - dip-agent
+
 networks:
   dip-agent:
     name: dip-agent
     driver: bridge
 
-# Note: agent-app's DATABASE_URL here points at the postgres service by
-# container name (postgres:5432), not localhost — different from the
-# native/non-Docker .env value, which points at localhost:5432. This is
-# the normal Docker-networking distinction, not an inconsistency; use
-# whichever DATABASE_URL matches how you're actually running things.
-
-
+# Note: agent-app's and full-stack-agent-app's DATABASE_URL/AGENT_SERVICE_URL
+# here point at the postgres/agent-service services by container name
+# (postgres:5432, agent-service:8000), not localhost, different from the
+# native/non-Docker .env values, which point at localhost. This is the
+# normal Docker-networking distinction, not an inconsistency; use whichever
+# value matches how you're actually running things.
