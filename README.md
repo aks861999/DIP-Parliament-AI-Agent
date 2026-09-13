@@ -723,7 +723,7 @@ pytest tests -v -m integration
 # Progressive Improvements of the Codebase / Bug Fixes
 
 
-# 2026-09-12 — MCP idle-connection failures fixed with auto-reconnect
+# 2026-09-12 - MCP idle-connection failures fixed with auto-reconnect
 
 ## Problem
 
@@ -733,7 +733,7 @@ pytest tests -v -m integration
 ValueError: Error executing tool get_party_distribution: Error UNKNOWN while writing to socket. Connection lost.
 ```
 
-Confirmed `mcp-server` itself never restarted (same PID, 10h uptime) — this was a stale client connection with no reconnect logic, so every call kept failing until `agent-service` was manually restarted.
+Confirmed `mcp-server` itself never restarted (same PID, 10h uptime) - this was a stale client connection with no reconnect logic, so every call kept failing until `agent-service` was manually restarted.
 
 ## Fix
 
@@ -744,3 +744,17 @@ In `agent_graph.py`, wrapped both tool-call sites so that on a transport-level e
 ## Result
 
 - One bounded retry per failure, no infinite loop.
+
+
+
+
+## 2026-09-13 - Multi-Wahlperiode retrieval, date resolution & caching fixes
+
+- **Full-history questions only used 3 of 21 Wahlperioden** → unified `get_party_distribution` to accept a list. [Details](progressive-fixes/README.md#1-couldnt-retrieve-full-history-data-which-year-was-cdu-highest)
+- **Date questions resolved to the wrong Wahlperiode** (WP21 instead of WP20) → added deterministic fact + veto in 3 places. [Details](progressive-fixes/README.md#2-date-questions-resolved-to-the-wrong-wahlperiode-wp21-instead-of-wp20)
+- **Classifier randomly said "out of scope"** for valid questions → keyword veto on the classifier output. [Details](progressive-fixes/README.md#3-classifier-randomly-said-out-of-scope-for-valid-questions)
+- **Synthesis refused to answer**, calling "population" an invalid field → clarified colloquial-term handling in the prompt. [Details](progressive-fixes/README.md#4-synthesis-refused-to-answer-calling-population-an-invalid-field)
+- **Charts rendered as a blank Plotly skeleton** → fixed chart builder for the new nested data shape. [Details](progressive-fixes/README.md#5-charts-rendered-as-a-blank-plotly-skeleton)
+- **Asking for "20 and 21" refetched WP20 live** despite being cached → switched Redis cache to per-Wahlperiode keys. [Details](progressive-fixes/README.md#6-asking-for-20-and-21-refetched-wp20-live-even-though-it-was-cached)
+- **Reusing WP21 evidence dragged in WP20 on the chart** → decomposed multi-Wahlperiode results into per-Wahlperiode entries. [Details](progressive-fixes/README.md#7-reusing-one-wahlperiodes-evidence-dragged-in-an-unrelated-one-on-the-chart)
+- **Dedup missed partial overlaps after the above fix** → decompose the candidate call too, fetch only what's genuinely missing. [Details](progressive-fixes/README.md#8-tool-call-dedup-missed-partial-overlaps-after-the-item-7-fix)
