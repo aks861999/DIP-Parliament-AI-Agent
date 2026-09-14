@@ -14,7 +14,27 @@ let pool: Pool | undefined;
 
 function getPool(): Pool {
   if (!pool) {
-    pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      // Fail loudly and specifically instead of letting `pg` surface a
+      // cryptic "SASL: client password must be a string" error further
+      // down -- that message is what an undefined connectionString
+      // actually looks like from inside pg, with no indication of WHY.
+      throw new Error(
+        "DATABASE_URL is not set. Check that services/full-stack-agent-app/.env.local " +
+          "exists and Next.js was restarted after creating/editing it."
+      );
+    }
+    pool = new Pool({
+      connectionString,
+      // Render's managed Postgres uses a self-signed certificate even for
+      // internal connections (documented Render behavior, not a bug) --
+      // pg's default strict certificate verification rejects it with
+      // SELF_SIGNED_CERT_IN_CHAIN. Only applied in production (Render);
+      // local/Docker-Compose Postgres has no SSL configured at all, so
+      // forcing this there would break local connections instead.
+      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+    });
   }
   return pool;
 }
