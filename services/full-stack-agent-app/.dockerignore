@@ -1,0 +1,16 @@
+# services/full-stack-agent-app/.dockerignore
+# Rename this file to exactly ".dockerignore" (no extension) once downloaded.
+# .gitignore controls what GIT tracks; this controls what gets sent to the
+# Docker daemon as build context. They're separate mechanisms -- this file
+# was missing, which is why the build context was ~884MB (mostly your local
+# node_modules, which the Dockerfile reinstalls fresh anyway via `npm install`).
+
+node_modules
+.next
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+npm-debug.log*
+*.tsbuildinfo

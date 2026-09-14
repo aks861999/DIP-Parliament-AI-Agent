@@ -45,7 +45,7 @@ export default function PartyChart({
       <Plot
         data={traces as any}
         layout={{
-          title,
+          title: { text: title },
           barmode: isComparison ? "group" : undefined,
           autosize: true,
           margin: { t: 40, l: 40, r: 20, b: 40 },
