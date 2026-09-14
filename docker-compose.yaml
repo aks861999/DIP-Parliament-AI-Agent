@@ -88,6 +88,7 @@ services:
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=${LANGFUSE_HOST}
+      - APP_SHARED_SECRET=${APP_SHARED_SECRET}
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,7 +120,7 @@ services:
     build:
       context: ./services/full-stack-agent-app
     ports:
-    - "3000:3000"
+    - "3001:3001"
     environment:
     - AGENT_SERVICE_URL=http://agent-service:8000
     - APP_SHARED_SECRET=${APP_SHARED_SECRET}
