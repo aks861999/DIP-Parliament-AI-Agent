@@ -12,28 +12,34 @@ import { Pool } from "pg";
 
 let pool: Pool | undefined;
 
+function stripSslMode(raw: string): string {
+  // Render's provided DATABASE_URL includes `sslmode=require`, which pg's
+  // own connection-string parser now treats as full certificate
+  // verification -- that silently overrides the `ssl` object below.
+  // Stripping it here forces our explicit ssl config to be the only
+  // thing controlling TLS behavior, with no ambiguity.
+  try {
+    const url = new URL(raw);
+    url.searchParams.delete("sslmode");
+    return url.toString();
+  } catch {
+    return raw;
+  }
+}
+
 function getPool(): Pool {
   if (!pool) {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      // Fail loudly and specifically instead of letting `pg` surface a
-      // cryptic "SASL: client password must be a string" error further
-      // down -- that message is what an undefined connectionString
-      // actually looks like from inside pg, with no indication of WHY.
+    const rawConnectionString = process.env.DATABASE_URL;
+    if (!rawConnectionString) {
       throw new Error(
         "DATABASE_URL is not set. Check that services/full-stack-agent-app/.env.local " +
           "exists and Next.js was restarted after creating/editing it."
       );
     }
+    const isProd = process.env.NODE_ENV === "production";
     pool = new Pool({
-      connectionString,
-      // Render's managed Postgres uses a self-signed certificate even for
-      // internal connections (documented Render behavior, not a bug) --
-      // pg's default strict certificate verification rejects it with
-      // SELF_SIGNED_CERT_IN_CHAIN. Only applied in production (Render);
-      // local/Docker-Compose Postgres has no SSL configured at all, so
-      // forcing this there would break local connections instead.
-      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+      connectionString: isProd ? stripSslMode(rawConnectionString) : rawConnectionString,
+      ssl: isProd ? { rejectUnauthorized: false } : undefined,
     });
   }
   return pool;
